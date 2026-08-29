@@ -304,15 +304,10 @@ func (e *ReportError) Unwrap() []error {
 // the caller wants violations and evaluation issues as an error.
 func Check(snapshot Snapshot, budgets map[string]float64) Report {
 	var report Report
-	names := make([]string, 0, len(budgets))
-	for name := range budgets {
-		names = append(names, name)
-	}
-	sort.Strings(names)
 
-	for _, name := range names {
+	for _, name := range budgetNames(budgets) {
 		limit := budgets[name]
-		if math.IsNaN(limit) || math.IsInf(limit, 0) {
+		if invalidBudget(limit) {
 			report.Issues = append(report.Issues, Issue{Name: name, Err: metricError(ErrInvalidBudget, name)})
 			continue
 		}
@@ -332,22 +327,88 @@ func Check(snapshot Snapshot, budgets map[string]float64) Report {
 			report.Issues = append(report.Issues, Issue{Name: name, Err: err})
 			continue
 		}
-		switch value.kind {
-		case metrics.KindUint64:
-			if uint64Exceeds(value.uint64, limit) {
-				report.Violations = append(report.Violations, Violation{Name: name, Value: float64(value.uint64), Limit: limit, Kind: value.kind})
-			}
-		case metrics.KindFloat64:
-			if value.float64 > limit {
-				report.Violations = append(report.Violations, Violation{Name: name, Value: value.float64, Limit: limit, Kind: value.kind})
-			}
-		case metrics.KindFloat64Histogram:
-			report.Issues = append(report.Issues, Issue{Name: name, Err: metricError(ErrHistogramBudget, name)})
-		default:
-			report.Issues = append(report.Issues, Issue{Name: name, Err: metricError(ErrUnsupportedKind, name)})
+		checkValue(&report, name, value, limit)
+	}
+	return report
+}
+
+// CheckDelta evaluates maximum budgets against cumulative metric increases.
+// The returned report is deterministic by metric name.
+func CheckDelta(previous, current Snapshot, budgets map[string]float64) Report {
+	var report Report
+	for _, name := range budgetNames(budgets) {
+		limit := budgets[name]
+		if invalidBudget(limit) {
+			report.Issues = append(report.Issues, Issue{Name: name, Err: metricError(ErrInvalidBudget, name)})
+			continue
+		}
+
+		value, err := Delta(previous, current, name)
+		if err != nil {
+			report.Issues = append(report.Issues, Issue{Name: name, Err: err})
+			continue
+		}
+		checkValue(&report, name, value, limit)
+	}
+	return report
+}
+
+// CheckRate evaluates maximum budgets against cumulative metric increases per second.
+// The returned report is deterministic by metric name.
+func CheckRate(previous, current Snapshot, budgets map[string]float64) Report {
+	var report Report
+	for _, name := range budgetNames(budgets) {
+		limit := budgets[name]
+		if invalidBudget(limit) {
+			report.Issues = append(report.Issues, Issue{Name: name, Err: metricError(ErrInvalidBudget, name)})
+			continue
+		}
+
+		rate, err := Rate(previous, current, name)
+		if err != nil {
+			report.Issues = append(report.Issues, Issue{Name: name, Err: err})
+			continue
+		}
+		description, ok := findDescription(name)
+		if !ok {
+			report.Issues = append(report.Issues, Issue{Name: name, Err: metricError(ErrUnknownMetric, name)})
+			continue
+		}
+		if rate > limit {
+			report.Violations = append(report.Violations, Violation{Name: name, Value: rate, Limit: limit, Kind: description.Kind})
 		}
 	}
 	return report
+}
+
+func budgetNames(budgets map[string]float64) []string {
+	names := make([]string, 0, len(budgets))
+	for name := range budgets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func invalidBudget(limit float64) bool {
+	return math.IsNaN(limit) || math.IsInf(limit, 0)
+}
+
+func checkValue(report *Report, name string, value Value, limit float64) {
+	switch value.kind {
+	case metrics.KindUint64:
+		if uint64Exceeds(value.uint64, limit) {
+			report.Violations = append(report.Violations, Violation{Name: name, Value: float64(value.uint64), Limit: limit, Kind: value.kind})
+		}
+	case metrics.KindFloat64:
+		if value.float64 > limit {
+			report.Violations = append(report.Violations, Violation{Name: name, Value: value.float64, Limit: limit, Kind: value.kind})
+		}
+	case metrics.KindFloat64Histogram:
+		report.Issues = append(report.Issues, Issue{Name: name, Err: metricError(ErrHistogramBudget, name)})
+	default:
+		report.Issues = append(report.Issues, Issue{Name: name, Err: metricError(ErrUnsupportedKind, name)})
+	}
 }
 
 func copyValue(value metrics.Value) Value {

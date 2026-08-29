@@ -38,6 +38,18 @@ if err := report.Err(); err != nil {
 }
 ```
 
+For cumulative budgets, compare two snapshots directly or per second:
+
+```go
+report := runtimebudget.CheckDelta(before, after, map[string]float64{
+	"/gc/cycles/total:gc-cycles": 100,
+})
+// CheckRate(before, after, budgets) uses the same budgets as values/second.
+if err := report.Err(); err != nil {
+	return err
+}
+```
+
 The runtime metrics API is implementation-defined and evolves with Go. This package consults `runtime/metrics.All()` at runtime rather than maintaining its own metric list.
 
 API reference: [runtime/metrics package](https://pkg.go.dev/runtime/metrics), [Go source](https://go.dev/src/runtime/metrics/doc.go).

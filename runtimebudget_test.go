@@ -151,6 +151,78 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+func TestCheckDelta(t *testing.T) {
+	previous := testSnapshot(time.Unix(10, 0), map[string]Value{
+		uintMetric:                 {kind: metrics.KindUint64, uint64: 10},
+		floatMetric:                {kind: metrics.KindFloat64, float64: 1.5},
+		budgetMetric:               {kind: metrics.KindUint64, uint64: 10},
+		"/sched/latencies:seconds": histogramValue([]uint64{2, 3}, []float64{0, 1, math.Inf(1)}),
+	})
+	current := testSnapshot(time.Unix(12, 0), map[string]Value{
+		uintMetric:                 {kind: metrics.KindUint64, uint64: 17},
+		floatMetric:                {kind: metrics.KindFloat64, float64: 4.5},
+		budgetMetric:               {kind: metrics.KindUint64, uint64: 11},
+		"/sched/latencies:seconds": histogramValue([]uint64{5, 8}, []float64{0, 1, math.Inf(1)}),
+	})
+
+	report := CheckDelta(previous, current, map[string]float64{
+		uintMetric:                 6,
+		floatMetric:                2,
+		budgetMetric:               1,
+		"/sched/latencies:seconds": 1,
+		"runtimebudget/unknown":    1,
+	})
+	if len(report.Violations) != 2 || report.Violations[0].Name != floatMetric || report.Violations[1].Name != uintMetric {
+		t.Fatalf("delta violations = %#v", report.Violations)
+	}
+	if len(report.Issues) != 3 || report.Issues[0].Name != budgetMetric || report.Issues[1].Name != "/sched/latencies:seconds" || report.Issues[2].Name != "runtimebudget/unknown" {
+		t.Fatalf("delta issues = %#v", report.Issues)
+	}
+	if !errors.Is(report.Err(), ErrNotCumulative) || !errors.Is(report.Err(), ErrHistogramScalarDelta) || !errors.Is(report.Err(), ErrUnknownMetric) {
+		t.Fatalf("delta report error = %v", report.Err())
+	}
+
+	reset := testSnapshot(time.Unix(12, 0), map[string]Value{uintMetric: {kind: metrics.KindUint64, uint64: 1}})
+	if !errors.Is(CheckDelta(previous, reset, map[string]float64{uintMetric: 1}).Err(), ErrCounterReset) {
+		t.Fatal("counter reset was not reported by CheckDelta")
+	}
+
+	invalid := CheckDelta(previous, current, map[string]float64{uintMetric: math.NaN(), floatMetric: math.Inf(1)})
+	if len(invalid.Issues) != 2 || !errors.Is(invalid.Err(), ErrInvalidBudget) {
+		t.Fatalf("invalid delta budgets = %#v", invalid)
+	}
+}
+
+func TestCheckRate(t *testing.T) {
+	previous := testSnapshot(time.Unix(10, 0), map[string]Value{
+		uintMetric:  {kind: metrics.KindUint64, uint64: 10},
+		floatMetric: {kind: metrics.KindFloat64, float64: 1.5},
+	})
+	current := testSnapshot(time.Unix(12, 0), map[string]Value{
+		uintMetric:  {kind: metrics.KindUint64, uint64: 17},
+		floatMetric: {kind: metrics.KindFloat64, float64: 4.5},
+	})
+
+	report := CheckRate(previous, current, map[string]float64{
+		uintMetric:  3,
+		floatMetric: 1,
+	})
+	if len(report.Violations) != 2 || report.Violations[0].Name != floatMetric || report.Violations[0].Value != 1.5 || report.Violations[1].Name != uintMetric || report.Violations[1].Value != 3.5 {
+		t.Fatalf("rate violations = %#v", report.Violations)
+	}
+	if report.Violations[0].Kind != metrics.KindFloat64 || report.Violations[1].Kind != metrics.KindUint64 {
+		t.Fatalf("rate violation kinds = %#v", report.Violations)
+	}
+
+	negative := CheckRate(previous, current, map[string]float64{floatMetric: -1})
+	if len(negative.Violations) != 1 || negative.Violations[0].Limit != -1 {
+		t.Fatalf("negative rate budget = %#v", negative)
+	}
+	if !errors.Is(CheckRate(current, previous, map[string]float64{floatMetric: 1}).Err(), ErrInvalidInterval) {
+		t.Fatal("invalid interval was not reported by CheckRate")
+	}
+}
+
 func TestReportOK(t *testing.T) {
 	if err := Check(testSnapshot(time.Unix(1, 0), map[string]Value{
 		budgetMetric: {kind: metrics.KindUint64, uint64: 10},
