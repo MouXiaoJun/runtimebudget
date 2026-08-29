@@ -2,6 +2,7 @@
 package runtimebudget
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -40,6 +41,12 @@ var (
 	ErrHistogramBudget = errors.New("runtimebudget: histogram budget needs bucket handling")
 	// ErrBudgetExceeded means at least one budget was exceeded.
 	ErrBudgetExceeded = errors.New("runtimebudget: budget exceeded")
+	// ErrNilContext means WatchRate received a nil context.
+	ErrNilContext = errors.New("runtimebudget: nil context")
+	// ErrNilCallback means WatchRate received a nil report callback.
+	ErrNilCallback = errors.New("runtimebudget: nil callback")
+	// ErrInvalidWatchInterval means WatchRate received a non-positive interval.
+	ErrInvalidWatchInterval = errors.New("runtimebudget: watch interval must be positive")
 )
 
 // Snapshot is an immutable copy of selected runtime metrics at one point in time.
@@ -381,6 +388,54 @@ func CheckRate(previous, current Snapshot, budgets map[string]float64) Report {
 	return report
 }
 
+// WatchRate samples selected cumulative metrics immediately and then at each
+// interval, reporting the rate between consecutive samples. It blocks until
+// ctx is canceled and then returns ctx.Err(). Reports are delivered
+// synchronously in the caller's goroutine.
+func WatchRate(ctx context.Context, interval time.Duration, budgets map[string]float64, onReport func(Report)) error {
+	if ctx == nil {
+		return ErrNilContext
+	}
+	if onReport == nil {
+		return ErrNilCallback
+	}
+	if interval <= 0 {
+		return ErrInvalidWatchInterval
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	budgets = cloneBudgets(budgets)
+	names := budgetNames(budgets)
+	return watchRate(ctx, interval, budgets, names, onReport, func(names []string) Snapshot {
+		if len(names) == 0 {
+			return Snapshot{at: time.Now()}
+		}
+		return Read(names...)
+	})
+}
+
+func watchRate(ctx context.Context, interval time.Duration, budgets map[string]float64, names []string, onReport func(Report), read func([]string) Snapshot) error {
+	previous := read(names)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			current := read(names)
+			onReport(CheckRate(previous, current, budgets))
+			previous = current
+		}
+	}
+}
+
 func budgetNames(budgets map[string]float64) []string {
 	names := make([]string, 0, len(budgets))
 	for name := range budgets {
@@ -388,6 +443,14 @@ func budgetNames(budgets map[string]float64) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func cloneBudgets(budgets map[string]float64) map[string]float64 {
+	clone := make(map[string]float64, len(budgets))
+	for name, limit := range budgets {
+		clone[name] = limit
+	}
+	return clone
 }
 
 func invalidBudget(limit float64) bool {

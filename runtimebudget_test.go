@@ -1,6 +1,7 @@
 package runtimebudget
 
 import (
+	"context"
 	"errors"
 	"math"
 	"runtime/metrics"
@@ -220,6 +221,95 @@ func TestCheckRate(t *testing.T) {
 	}
 	if !errors.Is(CheckRate(current, previous, map[string]float64{floatMetric: 1}).Err(), ErrInvalidInterval) {
 		t.Fatal("invalid interval was not reported by CheckRate")
+	}
+}
+
+func TestWatchRateValidation(t *testing.T) {
+	callback := func(Report) {}
+	if !errors.Is(WatchRate(nil, time.Second, nil, callback), ErrNilContext) {
+		t.Fatal("nil context was not rejected")
+	}
+	if !errors.Is(WatchRate(context.Background(), time.Second, nil, nil), ErrNilCallback) {
+		t.Fatal("nil callback was not rejected")
+	}
+	if !errors.Is(WatchRate(context.Background(), 0, nil, callback), ErrInvalidWatchInterval) {
+		t.Fatal("non-positive interval was not rejected")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !errors.Is(WatchRate(ctx, time.Second, nil, callback), context.Canceled) {
+		t.Fatal("canceled context was not returned")
+	}
+}
+
+func TestWatchRateSamplesSelectedMetricsInOrder(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	budgets := map[string]float64{uintMetric: 0, floatMetric: 0}
+	samples := []Snapshot{
+		testSnapshot(time.Unix(1, 0), map[string]Value{
+			uintMetric:  {kind: metrics.KindUint64, uint64: 0},
+			floatMetric: {kind: metrics.KindFloat64, float64: 0},
+		}),
+		testSnapshot(time.Unix(2, 0), map[string]Value{
+			uintMetric:  {kind: metrics.KindUint64, uint64: 2},
+			floatMetric: {kind: metrics.KindFloat64, float64: 2},
+		}),
+		testSnapshot(time.Unix(3, 0), map[string]Value{
+			uintMetric:  {kind: metrics.KindUint64, uint64: 4},
+			floatMetric: {kind: metrics.KindFloat64, float64: 4},
+		}),
+	}
+	var reads int
+	var readNames [][]string
+	var events []string
+	read := func(names []string) Snapshot {
+		events = append(events, "read")
+		readNames = append(readNames, append([]string(nil), names...))
+		snapshot := samples[reads]
+		reads++
+		return snapshot
+	}
+	var reports []Report
+	onReport := func(report Report) {
+		events = append(events, "callback")
+		if len(reports) == 0 {
+			if len(report.Violations) != 2 {
+				t.Fatalf("first report violations = %#v", report.Violations)
+			}
+			report.Violations[0].Name = "changed by callback"
+		}
+		reports = append(reports, report)
+		if len(reports) == 2 {
+			cancel()
+		}
+	}
+
+	err := watchRate(ctx, time.Millisecond, budgets, budgetNames(budgets), onReport, read)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("WatchRate error = %v, want context.Canceled", err)
+	}
+	if reads != 3 || len(reports) != 2 {
+		t.Fatalf("reads/reports = %d/%d, want 3/2", reads, len(reports))
+	}
+	wantEvents := []string{"read", "read", "callback", "read", "callback"}
+	if len(events) != len(wantEvents) {
+		t.Fatalf("sampling events = %#v, want %#v", events, wantEvents)
+	}
+	for i := range wantEvents {
+		if events[i] != wantEvents[i] {
+			t.Fatalf("sampling events = %#v, want %#v", events, wantEvents)
+		}
+	}
+	wantNames := []string{floatMetric, uintMetric}
+	for i, names := range readNames {
+		if len(names) != len(wantNames) || names[0] != wantNames[0] || names[1] != wantNames[1] {
+			t.Fatalf("read %d names = %#v, want %#v", i, names, wantNames)
+		}
+	}
+	if reports[1].Violations[0].Name != floatMetric {
+		t.Fatalf("second report was affected by callback mutation: %#v", reports[1])
 	}
 }
 

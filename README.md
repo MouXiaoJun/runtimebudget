@@ -50,6 +50,23 @@ if err := report.Err(); err != nil {
 }
 ```
 
+To keep checking a cumulative budget without managing snapshots yourself:
+
+```go
+err := runtimebudget.WatchRate(ctx, time.Second, map[string]float64{
+	"/gc/cycles/total:gc-cycles": 100,
+}, func(report runtimebudget.Report) {
+		if err := report.Err(); err != nil {
+			// Handle a violation or an unevaluable metric.
+		}
+})
+// err is ctx.Err() after cancellation.
+```
+
+`WatchRate` samples the selected metrics immediately, then once per interval.
+Its callback runs synchronously; pass a non-nil context, callback, and positive
+interval.
+
 The runtime metrics API is implementation-defined and evolves with Go. This package consults `runtime/metrics.All()` at runtime rather than maintaining its own metric list.
 
 API reference: [runtime/metrics package](https://pkg.go.dev/runtime/metrics), [Go source](https://go.dev/src/runtime/metrics/doc.go).
