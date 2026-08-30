@@ -27,8 +27,9 @@ rate, err := runtimebudget.Rate(before, after, name)
 For non-cumulative scalar metrics, check maximum budgets:
 
 ```go
+snapshot := runtimebudget.Read("/sched/goroutines:goroutines")
 report := runtimebudget.Check(snapshot, map[string]float64{
-	"/gc/heap/goal:bytes": 64 << 20,
+	"/sched/goroutines:goroutines": 1000,
 })
 if err := report.Err(); err != nil {
 	// errors.Is(err, runtimebudget.ErrBudgetExceeded) identifies violations.
@@ -37,6 +38,26 @@ if err := report.Err(); err != nil {
 	return err
 }
 ```
+
+Choose the metric and budget operation together. Limits in examples are illustrative,
+not recommended production thresholds:
+
+| Metric | Operation | Budget unit |
+| --- | --- | --- |
+| `/sched/goroutines:goroutines` | `Check` | current goroutine count |
+| `/gc/heap/allocs:bytes` | `CheckDelta` | bytes allocated between snapshots |
+| `/gc/heap/allocs:bytes` | `CheckRate` | allocated bytes per second of the actual snapshot interval |
+
+`/gc/heap/goal:bytes` is the GC heap target, not process RSS.
+`/cpu/classes/total:cpu-seconds` measures available Go CPU time (including idle
+capacity), not actual process CPU usage. Consult the runtime description before
+interpreting a metric as a resource budget.
+
+`Check` rejects cumulative metrics with `ErrCumulativeMetric` and directs callers
+to `CheckDelta`/`CheckRate` for scalars or `HistogramDelta` for histograms.
+This corrects its former, misleading `ErrNotCumulative`
+classification. `Delta`, `Rate`, `CheckDelta`, and `CheckRate` still use
+`ErrNotCumulative` when given a non-cumulative metric.
 
 For cumulative budgets, compare two snapshots directly or per second:
 
@@ -63,9 +84,11 @@ err := runtimebudget.WatchRate(ctx, time.Second, map[string]float64{
 // err is ctx.Err() after cancellation.
 ```
 
-`WatchRate` samples the selected metrics immediately, then once per interval.
+`WatchRate` takes a baseline immediately; the first report follows the next sample.
 Its callback runs synchronously; pass a non-nil context, callback, and positive
-interval.
+interval. A slow callback delays sampling and may cause ticker events to be dropped.
+Rates divide by the actual time between snapshots, not the requested interval.
+Cancellation cannot interrupt the callback: it must return before `WatchRate` exits.
 
 The runtime metrics API is implementation-defined and evolves with Go. This package consults `runtime/metrics.All()` at runtime rather than maintaining its own metric list.
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"runtime/metrics"
+	"strings"
 	"testing"
 	"time"
 )
@@ -127,6 +128,44 @@ func TestHistogramDelta(t *testing.T) {
 	if _, err := Delta(previous, current, name); !errors.Is(err, ErrHistogramScalarDelta) {
 		t.Fatalf("histogram scalar Delta error = %v", err)
 	}
+	delta.Counts[0], delta.Buckets[0] = 99, -99
+	again, err := HistogramDelta(previous, current, name)
+	if err != nil || again.Counts[0] != 3 || again.Buckets[0] != 0 {
+		t.Fatalf("HistogramDelta result was aliased: %#v, %v", again, err)
+	}
+	for _, test := range []struct {
+		value Value
+		want  error
+	}{
+		{histogramValue([]uint64{5, 8}, []float64{0, 2, math.Inf(1)}), ErrHistogramLayout},
+		{histogramValue([]uint64{1, 8}, []float64{0, 1, math.Inf(1)}), ErrCounterReset},
+	} {
+		changed := testSnapshot(time.Unix(2, 0), map[string]Value{name: test.value})
+		if _, err := HistogramDelta(previous, changed, name); !errors.Is(err, test.want) {
+			t.Errorf("HistogramDelta error = %v, want %v", err, test.want)
+		}
+	}
+}
+
+func TestSnapshotHistogramIsIndependent(t *testing.T) {
+	const name = "/sched/latencies:seconds"
+	snapshot := Read(name)
+	value, ok := snapshot.Get(name)
+	if !ok {
+		t.Fatal("histogram missing")
+	}
+	histogram, ok := value.Histogram()
+	if !ok || len(histogram.Counts) == 0 {
+		t.Fatal("histogram unavailable")
+	}
+	count, bucket := histogram.Counts[0], histogram.Buckets[0]
+	histogram.Counts[0], histogram.Buckets[0] = count+1, 42
+	Read(name)
+	value, _ = snapshot.Get(name)
+	again, _ := value.Histogram()
+	if again.Counts[0] != count || again.Buckets[0] != bucket {
+		t.Fatal("histogram mutation or later Read changed the snapshot")
+	}
 }
 
 func TestCheck(t *testing.T) {
@@ -149,6 +188,39 @@ func TestCheck(t *testing.T) {
 	}
 	if !errors.Is(Check(snapshot, map[string]float64{budgetMetric: math.NaN()}).Err(), ErrInvalidBudget) {
 		t.Fatal("invalid budget was not reported")
+	}
+}
+
+func TestCheckCumulativeDiagnostic(t *testing.T) {
+	for _, name := range []string{uintMetric, floatMetric, "/sched/latencies:seconds"} {
+		t.Run(name, func(t *testing.T) {
+			report := Check(Read(name), map[string]float64{name: 100})
+			if len(report.Issues) != 1 || len(report.Violations) != 0 {
+				t.Fatalf("report = %#v, want one evaluation issue", report)
+			}
+			err := report.Err()
+			if !errors.Is(err, ErrCumulativeMetric) || errors.Is(err, ErrNotCumulative) ||
+				!strings.Contains(err.Error(), "is cumulative") ||
+				!strings.Contains(err.Error(), "CheckDelta") || !strings.Contains(err.Error(), "CheckRate") {
+				t.Fatalf("Check cumulative metric error = %v, want cumulative diagnostic and guidance", err)
+			}
+			if name == "/sched/latencies:seconds" && !strings.Contains(err.Error(), "HistogramDelta") {
+				t.Fatalf("histogram diagnostic must name HistogramDelta: %v", err)
+			}
+		})
+	}
+
+	previous, current := Read(budgetMetric), Read(budgetMetric)
+	_, deltaErr := Delta(previous, current, budgetMetric)
+	_, rateErr := Rate(previous, current, budgetMetric)
+	for _, err := range []error{
+		deltaErr, rateErr,
+		CheckDelta(previous, current, map[string]float64{budgetMetric: 1}).Err(),
+		CheckRate(previous, current, map[string]float64{budgetMetric: 1}).Err(),
+	} {
+		if !errors.Is(err, ErrNotCumulative) {
+			t.Errorf("non-cumulative metric error = %v, want ErrNotCumulative", err)
+		}
 	}
 }
 
@@ -252,11 +324,11 @@ func TestWatchRateSamplesSelectedMetricsInOrder(t *testing.T) {
 			uintMetric:  {kind: metrics.KindUint64, uint64: 0},
 			floatMetric: {kind: metrics.KindFloat64, float64: 0},
 		}),
-		testSnapshot(time.Unix(2, 0), map[string]Value{
+		testSnapshot(time.Unix(3, 0), map[string]Value{
 			uintMetric:  {kind: metrics.KindUint64, uint64: 2},
 			floatMetric: {kind: metrics.KindFloat64, float64: 2},
 		}),
-		testSnapshot(time.Unix(3, 0), map[string]Value{
+		testSnapshot(time.Unix(8, 0), map[string]Value{
 			uintMetric:  {kind: metrics.KindUint64, uint64: 4},
 			floatMetric: {kind: metrics.KindFloat64, float64: 4},
 		}),
@@ -274,11 +346,13 @@ func TestWatchRateSamplesSelectedMetricsInOrder(t *testing.T) {
 	var reports []Report
 	onReport := func(report Report) {
 		events = append(events, "callback")
+		wantRate := []float64{1, 0.4}[len(reports)]
+		if len(report.Violations) != 2 || report.Violations[0].Value != wantRate || report.Violations[1].Value != wantRate {
+			t.Fatalf("rate report = %#v, want %g using the actual sample interval", report, wantRate)
+		}
 		if len(reports) == 0 {
-			if len(report.Violations) != 2 {
-				t.Fatalf("first report violations = %#v", report.Violations)
-			}
 			report.Violations[0].Name = "changed by callback"
+			time.Sleep(3 * time.Millisecond) // Slower than the ticker; no samples run during this callback.
 		}
 		reports = append(reports, report)
 		if len(reports) == 2 {

@@ -25,6 +25,8 @@ var (
 	ErrUnsupportedKind = errors.New("runtimebudget: unsupported metric kind")
 	// ErrNotCumulative means an operation requiring a cumulative metric was requested.
 	ErrNotCumulative = errors.New("runtimebudget: metric is not cumulative")
+	// ErrCumulativeMetric means Check received a cumulative metric.
+	ErrCumulativeMetric = errors.New("runtimebudget: metric is cumulative; use CheckDelta or CheckRate for scalars, HistogramDelta for histograms")
 	// ErrHistogramScalarDelta means a histogram was passed to scalar Delta or Rate.
 	ErrHistogramScalarDelta = errors.New("runtimebudget: histogram needs bucket handling")
 	// ErrHistogramRequired means HistogramDelta was passed a non-histogram metric.
@@ -309,6 +311,8 @@ func (e *ReportError) Unwrap() []error {
 // Check evaluates maximum numeric budgets for non-cumulative scalar metrics.
 // The returned report is deterministic by metric name. Use report.Err() when
 // the caller wants violations and evaluation issues as an error.
+// Cumulative metrics produce ErrCumulativeMetric; use CheckDelta or CheckRate for
+// scalars and HistogramDelta for histograms.
 func Check(snapshot Snapshot, budgets map[string]float64) Report {
 	var report Report
 
@@ -325,7 +329,7 @@ func Check(snapshot Snapshot, budgets map[string]float64) Report {
 			continue
 		}
 		if description.Cumulative {
-			report.Issues = append(report.Issues, Issue{Name: name, Err: metricError(ErrNotCumulative, name)})
+			report.Issues = append(report.Issues, Issue{Name: name, Err: metricError(ErrCumulativeMetric, name)})
 			continue
 		}
 
@@ -392,6 +396,9 @@ func CheckRate(previous, current Snapshot, budgets map[string]float64) Report {
 // interval, reporting the rate between consecutive samples. It blocks until
 // ctx is canceled and then returns ctx.Err(). Reports are delivered
 // synchronously in the caller's goroutine.
+// Slow callbacks delay sampling and may cause ticker events to be dropped.
+// Rates use actual snapshot timestamps, not the requested interval. Cancellation
+// does not interrupt a callback; it must return before WatchRate can exit.
 func WatchRate(ctx context.Context, interval time.Duration, budgets map[string]float64, onReport func(Report)) error {
 	if ctx == nil {
 		return ErrNilContext
