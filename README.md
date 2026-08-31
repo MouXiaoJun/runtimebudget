@@ -2,6 +2,26 @@
 
 `runtimebudget` is a Go 1.23, standard-library-only package for reading and comparing `runtime/metrics` snapshots.
 
+## Runnable allocation budget example
+
+[example_test.go](example_test.go) serializes a real JSON batch, checks its
+allocation growth against an illustrative 8 MiB budget, and verifies that a
+one-byte budget reports `ErrBudgetExceeded`. Both results are checked by Go's
+example runner:
+
+```sh
+GOWORK=off go test -run '^ExampleCheckDelta$' -count=1 -v
+```
+
+Measurements cover the **whole Go process**, including other goroutines and the
+sampling itself. Run isolated batch regression checks without unrelated work;
+these are not per-request allocation measurements, RSS limits, or enforcement
+that stops allocation. The example forces GC to flush allocation accounting;
+do not copy that into a production request handler. Choose measured thresholds
+for your workload and treat `Report.Issues` as failures, not successful checks.
+
+## Usage
+
 ```go
 const name = "/gc/cycles/total:gc-cycles"
 
@@ -93,3 +113,18 @@ Cancellation cannot interrupt the callback: it must return before `WatchRate` ex
 The runtime metrics API is implementation-defined and evolves with Go. This package consults `runtime/metrics.All()` at runtime rather than maintaining its own metric list.
 
 API reference: [runtime/metrics package](https://pkg.go.dev/runtime/metrics), [Go source](https://go.dev/src/runtime/metrics/doc.go).
+
+## Maintenance
+
+The API stays focused on process-level snapshots, deltas, rates and budgets;
+exporters and monitoring services are out of scope. CI checks Go 1.23.0 and the
+current stable release on Ubuntu with formatting, build, vet, full tests and race:
+
+```sh
+export GOWORK=off
+gofmt -l .
+go build ./...
+go vet ./...
+go test -count=1 ./...
+go test -race -count=1 ./...
+```
